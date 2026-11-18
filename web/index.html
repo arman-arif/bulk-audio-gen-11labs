@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audio Generator</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7385; --line: #e3e6ec;
+    --accent: #3b5bdb; --accent-text: #fff; --ok: #1f8a4c; --warn: #b7791f; --bad: #c92a2a;
+    --ok-bg: #e3f6ea; --warn-bg: #fdf3dc; --bad-bg: #fde8e8; --row-hover: #f0f3fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161b; --panel: #1c1f27; --text: #e6e8ee; --muted: #9097a8; --line: #2c303b;
+      --accent: #6d8cff; --accent-text: #0e1220; --ok: #52c98a; --warn: #e5b45a; --bad: #ff7a7a;
+      --ok-bg: #173324; --warn-bg: #3a2f14; --bad-bg: #3d1c1c; --row-hover: #232734;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Bengali", sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 80px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  label.inline { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+  select, input[type=text], input[type=number], input[type=search] {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; font: inherit; }
+  input[type=number] { width: 90px; }
+  select#voice { min-width: 260px; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+           border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .spacer { flex: 1; }
+  .stats { color: var(--muted); font-size: 13px; }
+  .progress { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; margin-top: 10px; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  #banner { display: none; margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; background: var(--bad-bg); color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  tbody tr:hover { background: var(--row-hover); }
+  td.path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+  td.text { font-size: 15px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; white-space: nowrap; }
+  .badge.exists { background: var(--ok-bg); color: var(--ok); }
+  .badge.missing { background: var(--warn-bg); color: var(--warn); }
+  .badge.failed { background: var(--bad-bg); color: var(--bad); }
+  .badge.running { background: var(--accent); color: var(--accent-text); }
+  .msg { display: block; font-size: 11px; color: var(--bad); margin-top: 3px; max-width: 280px; word-break: break-word; }
+  .tablewrap { overflow-x: auto; }
+  .empty { padding: 30px; text-align: center; color: var(--muted); }
+  td.play button { padding: 3px 9px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Audio Generator</h1>
+  <div class="sub" id="sub">Loading…</div>
+
+  <div id="banner"></div>
+
+  <div class="panel">
+    <div class="row">
+      <label>Voice
+        <select id="voice"></select>
+      </label>
+      <label>Delay between generations (s)
+        <input type="number" id="delay" min="0" step="0.1" value="0.5">
+      </label>
+      <label class="inline"><input type="checkbox" id="force"> Regenerate existing files</label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="genMissing">Generate all missing</button>
+      <button id="genSelected">Generate selected</button>
+      <button class="danger" id="stop" disabled>Stop</button>
+      <span class="spacer"></span>
+      <span class="stats" id="stats"></span>
+    </div>
+    <div class="progress"><div id="bar"></div></div>
+    <div class="stats" id="progressText" style="margin-top:6px"></div>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="margin-bottom:10px">
+      <label>Search <input type="search" id="search" placeholder="text or file name"></label>
+      <label>Language <select id="lang"><option value="">All</option></select></label>
+      <label>Status
+        <select id="status">
+          <option value="">All</option>
+          <option value="missing">Missing</option>
+          <option value="exists">Exists</option>
+          <option value="failed">Failed</option>
+        </select>
+      </label>
+      <span class="spacer"></span>
+      <button id="selVisible">Select visible</button>
+      <button id="selNone">Clear selection</button>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th style="width:30px"><input type="checkbox" id="all" title="Select all visible"></th>
+              <th>Status</th><th>Lang</th><th>Text</th><th>File</th><th></th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none">No entries match.</div>
+    </div>
+  </div>
+</div>
+
+<audio id="player"></audio>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = { entries: [], selected: new Set(), job: null, results: {}, polling: null };
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const res = await fetch(path, opt);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function banner(msg) {
+  const b = $("banner");
+  b.textContent = msg || "";
+  b.style.display = msg ? "block" : "none";
+}
+
+function fmtBytes(n) { return n > 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B"; }
+
+function visibleEntries() {
+  const q = $("search").value.trim().toLowerCase();
+  const lang = $("lang").value, st = $("status").value;
+  return state.entries.filter((e) => {
+    const failed = state.results[e.path]?.status === "failed";
+    if (lang && e.lang !== lang) return false;
+    if (st === "missing" && e.exists) return false;
+    if (st === "exists" && !e.exists) return false;
+    if (st === "failed" && !failed) return false;
+    if (q && !(e.text.toLowerCase().includes(q) || e.path.toLowerCase().includes(q))) return false;
+    return true;
+  });
+}
+
+function render() {
+  const rows = $("rows");
+  rows.textContent = "";
+  const list = visibleEntries();
+  $("empty").style.display = list.length ? "none" : "block";
+  const frag = document.createDocumentFragment();
+  for (const e of list) {
+    const tr = document.createElement("tr");
+    const res = state.results[e.path];
+    const running = state.job?.running && state.job.current === e.path;
+
+    const cbTd = document.createElement("td");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = state.selected.has(e.path);
+    cb.onchange = () => { cb.checked ? state.selected.add(e.path) : state.selected.delete(e.path); updateStats(); };
+    cbTd.appendChild(cb);
+
+    const stTd = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    if (running) { badge.classList.add("running"); badge.textContent = "generating…"; }
+    else if (res?.status === "failed") { badge.classList.add("failed"); badge.textContent = "failed"; }
+    else if (e.exists) { badge.classList.add("exists"); badge.textContent = "exists · " + fmtBytes(e.size); }
+    else { badge.classList.add("missing"); badge.textContent = "missing"; }
+    stTd.appendChild(badge);
+    if (res?.status === "failed") {
+      const m = document.createElement("span"); m.className = "msg"; m.textContent = res.message; stTd.appendChild(m);
+    }
+
+    const langTd = document.createElement("td"); langTd.textContent = e.lang;
+    const textTd = document.createElement("td"); textTd.className = "text"; textTd.textContent = e.text;
+    const pathTd = document.createElement("td"); pathTd.className = "path"; pathTd.textContent = e.path;
+
+    const playTd = document.createElement("td"); playTd.className = "play";
+    if (e.exists) {
+      const b = document.createElement("button"); b.textContent = "▶ Play";
+      b.onclick = () => play(e);
+      playTd.appendChild(b);
+    }
+    tr.append(cbTd, stTd, langTd, textTd, pathTd, playTd);
+    frag.appendChild(tr);
+  }
+  rows.appendChild(frag);
+  updateStats();
+}
+
+function updateStats() {
+  const total = state.entries.length;
+  const have = state.entries.filter((e) => e.exists).length;
+  $("stats").textContent = `${have}/${total} generated · ${state.selected.size} selected`;
+  const running = !!state.job?.running;
+  $("genMissing").disabled = running;
+  $("genSelected").disabled = running || state.selected.size === 0;
+  $("stop").disabled = !running || state.job?.stopping;
+  $("stop").textContent = state.job?.stopping ? "Stopping…" : "Stop";
+  const j = state.job;
+  if (j && j.total) {
+    $("bar").style.width = (100 * j.done / j.total) + "%";
+    const failed = Object.values(j.results).filter((r) => r.status === "failed").length;
+    $("progressText").textContent =
+      `${j.running ? "Running" : "Finished"}: ${j.done}/${j.total}` +
+      (failed ? ` · ${failed} failed` : "") + (j.current ? ` · ${j.current}` : "");
+  }
+}
+
+function play(e) {
+  const p = $("player");
+  p.src = "/audio/" + e.path.split("/").map(encodeURIComponent).join("/") + "?t=" + e.mtime;
+  p.play().catch(() => {});
+}
+
+async function loadEntries() {
+  const data = await api("/api/entries");
+  state.entries = data.entries;
+  const langs = [...new Set(state.entries.map((e) => e.lang))].sort();
+  const sel = $("lang"), cur = sel.value;
+  sel.length = 1;
+  for (const l of langs) sel.add(new Option(l, l));
+  sel.value = langs.includes(cur) ? cur : "";
+  $("sub").textContent = `${state.entries.length} entries from AUDIO_FILES.txt`;
+  render();
+}
+
+async function poll() {
+  try {
+    const s = await api("/api/status");
+    const wasRunning = !!state.job?.running;
+    state.job = s;
+    state.results = s.results || {};
+    if (wasRunning && !s.running) await loadEntries(); else render();
+    if (s.running) schedulePoll(); else state.polling = null;
+  } catch (err) { banner(err.message); state.polling = null; }
+}
+function schedulePoll() {
+  if (state.polling) clearTimeout(state.polling);
+  state.polling = setTimeout(poll, 1000);
+}
+
+async function start(paths) {
+  banner("");
+  try {
+    await api("/api/generate", {
+      paths, force: $("force").checked,
+      delay: parseFloat($("delay").value) || 0, voice_id: $("voice").value });
+    await poll();
+  } catch (err) { banner(err.message); }
+}
+
+$("genMissing").onclick = () => {
+  const scope = visibleEntries();
+  const paths = ($("force").checked ? scope : scope.filter((e) => !e.exists)).map((e) => e.path);
+  if (!paths.length) return banner("Nothing to generate for the current filter.");
+  start(paths);
+};
+$("genSelected").onclick = () => start([...state.selected]);
+$("stop").onclick = async () => { await api("/api/stop", {}); poll(); };
+$("selVisible").onclick = () => { visibleEntries().forEach((e) => state.selected.add(e.path)); render(); };
+$("selNone").onclick = () => { state.selected.clear(); $("all").checked = false; render(); };
+$("all").onchange = (ev) => {
+  visibleEntries().forEach((e) => ev.target.checked ? state.selected.add(e.path) : state.selected.delete(e.path));
+  render();
+};
+["search", "lang", "status"].forEach((id) => $(id).addEventListener("input", render));
+
+(async function init() {
+  try {
+    const cfg = await api("/api/config");
+    if (!cfg.has_key) banner("ELEVENLABS_API_KEY not found in .env.local — generation is disabled.");
+    $("delay").value = cfg.delay;
+    const voiceSel = $("voice");
+    voiceSel.add(new Option("Default (" + cfg.voice_id + ")", cfg.voice_id));
+    api("/api/voices").then((v) => {
+      voiceSel.textContent = "";
+      for (const x of v.voices) {
+        voiceSel.add(new Option(`${x.name} [${x.category}]`, x.id));
+      }
+      if (!v.voices.some((x) => x.id === cfg.voice_id)) voiceSel.add(new Option("Default (" + cfg.voice_id + ")", cfg.voice_id), 0);
+      voiceSel.value = cfg.voice_id;
+      if (v.error) banner("Could not load voices: " + v.error);
+    }).catch(() => {});
+    await loadEntries();
+    await poll();
+  } catch (err) { banner(err.message); }
+})();
+</script>
+</body>
+</html>

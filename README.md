@@ -65,11 +65,41 @@ python3 generate_audio.py --input other.txt
 
 ## Configuration
 
-Set at the top of `generate_audio.py`:
+Voice and model can be changed in `.env.local` (or the environment) without editing code:
 
-- `VOICE_ID`: the voice to use
-- `MODEL_ID`: `eleven_v4`
-- `OUTPUT_FORMAT`: `mp3_44100_128`
+```
+ELEVENLABS_VOICE_ID=5WbDBNLwAg4h26Km0GgQ
+ELEVENLABS_MODEL_ID=eleven_v3
+```
+
+Both are optional. If unset, the built-in defaults in `generate_audio.py` are used: voice Sarah (`EXAVITQu4vr4xnSDxMaL`) and model `eleven_v4`. See `.env.local.example`.
+
+`OUTPUT_FORMAT` (`mp3_44100_128`) is set at the top of `generate_audio.py`.
+
+## Free Voices
+
+| Voice | ID | Notes |
+|---|---|---|
+| Sarah | `EXAVITQu4vr4xnSDxMaL` | Female, clear and confident. Verified for Hindi, which is the closest language. |
+| Alice | `Xb7hH8MSUJpSbSDYk0k2` | Female, an educator style that suits kids' vocabulary words. Verified for Hindi. |
+| Jessica | `cgSgspJ2msm6clMCkdW9` | Female, playful and warm. Verified for Hindi. |
+| Brian | `nPczCjzI2devNBz1zQrb` | Male, calm. Verified for Hindi. |
+
+
+## Web interface
+
+```
+python3 web_app.py             # then open http://127.0.0.1:8000
+python3 web_app.py --port 9000
+```
+
+- Lists every entry from `AUDIO_FILES.txt` with its status (missing / exists / failed); filter by language, status or text.
+- Play existing audio in the browser.
+- Generate all missing files (in the current filter), only the selected rows, or regenerate with "Regenerate existing files". Live progress, and a Stop button.
+- Pick any voice on your account from a dropdown, and set the delay between generations.
+- Uses the same logic as the command line script, so existing files are skipped the same way.
+
+The server only listens on 127.0.0.1 and the API key stays on the server. Only one job runs at a time.
 
 ## Troubleshooting
 
