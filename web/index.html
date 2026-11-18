@@ -59,6 +59,15 @@
              border-radius: 6px; padding: 8px 10px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, "Noto Sans Bengali", monospace; resize: vertical; }
   code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
   #pasteMsg.bad { color: var(--bad); }
+  .pick { display: flex; gap: 6px; } .pick input { flex: 1; min-width: 0; }
+  .pick input[readonly] { color: var(--muted); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+           width: min(640px, 94vw); padding: 14px; }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  .pk-list { border: 1px solid var(--line); border-radius: 6px; height: 280px; overflow: auto; }
+  .pk-item { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; border-bottom: 1px solid var(--line); padding: 6px 10px; }
+  .pk-item:hover { background: var(--row-hover); }
+  .stats.bad { color: var(--bad); }
   .empty { padding: 30px; text-align: center; color: var(--muted); }
   td.play button { padding: 3px 9px; }
 </style>
@@ -69,6 +78,18 @@
   <div class="sub" id="sub">Loading…</div>
 
   <div id="banner"></div>
+
+  <div class="panel">
+    <div class="row">
+      <label style="flex:1;min-width:260px">Source text file
+        <div class="pick"><input type="text" id="srcPath" readonly><button id="pickSrc">Choose…</button></div>
+      </label>
+      <label style="flex:1;min-width:260px">Output folder
+        <div class="pick"><input type="text" id="outPath" readonly><button id="pickOut">Choose…</button></div>
+      </label>
+    </div>
+    <div class="stats" id="outNote" style="margin-top:6px"></div>
+  </div>
 
   <div class="panel">
     <div class="row">
@@ -135,6 +156,20 @@
     </div>
   </div>
 </div>
+
+<dialog id="picker">
+  <div class="pk-head"><strong id="pkTitle"></strong></div>
+  <div class="pick" style="margin:8px 0">
+    <input type="text" id="pkPath" spellcheck="false">
+    <button id="pkGo">Go</button>
+  </div>
+  <div id="pkList" class="pk-list"></div>
+  <div class="stats bad" id="pkErr" style="min-height:1.2em"></div>
+  <div class="row" style="margin-top:8px;justify-content:flex-end">
+    <button id="pkCancel">Cancel</button>
+    <button class="primary" id="pkUse">Use this folder</button>
+  </div>
+</dialog>
 
 <audio id="player"></audio>
 
@@ -228,6 +263,7 @@ function updateStats() {
   $("genMissing").disabled = running;
   $("genSelected").disabled = running || state.selected.size === 0;
   $("stop").disabled = !running || state.job?.stopping;
+  $("pickSrc").disabled = running; $("pickOut").disabled = running;
   $("stop").textContent = state.job?.stopping ? "Stopping…" : "Stop";
   const j = state.job;
   if (j && j.total) {
@@ -247,7 +283,12 @@ function play(e) {
 
 async function loadEntries() {
   const data = await api("/api/entries");
-  state.entries = data.entries;
+  // Missing files first; order is fixed until the next reload so rows don't jump while generating.
+  state.entries = [...data.entries.filter((e) => !e.exists), ...data.entries.filter((e) => e.exists)];
+  $("srcPath").value = data.source === "pasted" ? "(pasted text)" : data.source_file;
+  $("outPath").value = data.output_root;
+  $("outNote").textContent = data.output_exists ? "" : "Output folder does not exist yet; it will be created when generating.";
+  $("pickSrc").disabled = !!state.job?.running; $("pickOut").disabled = !!state.job?.running;
   const langs = [...new Set(state.entries.map((e) => e.lang))].sort();
   const sel = $("lang"), cur = sel.value;
   sel.length = 1;
@@ -255,19 +296,32 @@ async function loadEntries() {
   sel.value = langs.includes(cur) ? cur : "";
   state.source = data.source;
   $("sub").textContent = `${state.entries.length} entries from ` +
-    (data.source === "pasted" ? "pasted text" : "AUDIO_FILES.txt");
+    (data.source === "pasted" ? "pasted text" : data.source_file.split("/").pop());
   $("useFile").disabled = data.source !== "pasted";
   if (data.source === "pasted" && !$("pasteText").value) $("pasteText").value = data.pasted || "";
   render();
+}
+
+// Refresh exists/size/mtime of the current rows without changing their order.
+async function mergeStatus() {
+  const data = await api("/api/entries");
+  const fresh = new Map(data.entries.map((e) => [e.path, e]));
+  for (const e of state.entries) {
+    const f = fresh.get(e.path);
+    if (f) { e.exists = f.exists; e.size = f.size; e.mtime = f.mtime; }
+  }
 }
 
 async function poll() {
   try {
     const s = await api("/api/status");
     const wasRunning = !!state.job?.running;
+    const prevDone = state.job?.done;
     state.job = s;
     state.results = s.results || {};
-    if (wasRunning && !s.running) await loadEntries(); else render();
+    if (wasRunning && !s.running) await loadEntries();       // job finished: reload and re-sort
+    else if (s.done !== prevDone) { await mergeStatus(); render(); }  // a file finished: update its row
+    else render();
     if (s.running) schedulePoll(); else state.polling = null;
   } catch (err) { banner(err.message); state.polling = null; }
 }
@@ -292,6 +346,58 @@ $("genMissing").onclick = () => {
   if (!paths.length) return banner("Nothing to generate for the current filter.");
   start(paths);
 };
+const picker = { mode: "dir", dir: "" };
+async function pkLoad(path) {
+  $("pkErr").textContent = "";
+  try {
+    const r = await api("/api/browse?mode=" + picker.mode + "&path=" + encodeURIComponent(path || ""));
+    picker.dir = r.path; $("pkPath").value = r.path;
+    const list = $("pkList"); list.textContent = "";
+    const add = (label, target, isFile) => {
+      const b = document.createElement("button"); b.className = "pk-item"; b.textContent = label;
+      b.onclick = () => isFile ? pkChooseFile(target) : pkLoad(target);
+      list.appendChild(b);
+    };
+    if (r.parent) add("⬆ ..", r.parent, false);
+    for (const d of r.dirs) add("📁 " + d, r.path + "/" + d, false);
+    for (const f of r.files) add("📄 " + f, r.path + "/" + f, true);
+    if (!r.dirs.length && !r.files.length) list.textContent = "(empty)";
+  } catch (err) { $("pkErr").textContent = err.message; }
+}
+async function pkChooseFile(path) {
+  try {
+    const r = await api("/api/source", { path });
+    $("picker").close();
+    state.selected.clear(); state.results = {};
+    await loadEntries();
+    const probs = r.problems || [];
+    banner(probs.length ? `Loaded ${r.count} entries; skipped: ${probs.join("; ")}` : "");
+  } catch (err) { $("pkErr").textContent = err.message; }
+}
+function openPicker(mode, start) {
+  picker.mode = mode;
+  $("pkTitle").textContent = mode === "file" ? "Choose a source .txt file" : "Choose the output folder";
+  $("pkUse").style.display = mode === "dir" ? "" : "none";
+  $("picker").showModal();
+  pkLoad(start);
+}
+$("pickSrc").onclick = () => {
+  const cur = $("srcPath").value;
+  openPicker("file", cur.startsWith("/") ? cur.replace(/\/[^/]*$/, "") : "");
+};
+$("pickOut").onclick = () => openPicker("dir", $("outPath").value);
+$("pkGo").onclick = () => pkLoad($("pkPath").value);
+$("pkPath").addEventListener("keydown", (e) => { if (e.key === "Enter") pkLoad($("pkPath").value); });
+$("pkCancel").onclick = () => $("picker").close();
+$("pkUse").onclick = async () => {
+  try {
+    await api("/api/output", { path: $("pkPath").value });
+    $("picker").close();
+    state.selected.clear(); state.results = {};
+    await loadEntries();
+  } catch (err) { $("pkErr").textContent = err.message; }
+};
+
 async function setInput(text) {
   const msg = $("pasteMsg");
   msg.className = "stats"; msg.textContent = "";

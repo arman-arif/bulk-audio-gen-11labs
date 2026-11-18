@@ -45,11 +45,13 @@ python3 generate_audio.py --limit 3       # only the first 3 entries (good for t
 python3 generate_audio.py --force         # regenerate files that already exist
 python3 generate_audio.py --delay 1       # wait 1 second between generations
 python3 generate_audio.py --input other.txt
+python3 generate_audio.py --output-dir ~/my-app/assets   # entry paths are relative to this folder
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `--input` | `AUDIO_FILES.txt` | Input file |
+| `--output-dir DIR` | this folder | Folder the entry paths are relative to (created if missing) |
 | `--force` | off | Regenerate existing files |
 | `--limit N` | all | Only process the first N entries |
 | `--delay S` | `0.5` | Seconds to wait after each generation |
@@ -72,7 +74,7 @@ ELEVENLABS_VOICE_ID=5WbDBNLwAg4h26Km0GgQ
 ELEVENLABS_MODEL_ID=eleven_v3
 ```
 
-Both are optional. If unset, the built-in defaults in `generate_audio.py` are used: voice Sarah (`EXAVITQu4vr4xnSDxMaL`) and model `eleven_v4`. See `.env.local.example`.
+Both are optional. If unset, the built-in defaults in `generate_audio.py` are used: voice Sarah (`EXAVITQu4vr4xnSDxMaL`) and model `eleven_v4_turbo` (the previous default, `eleven_v4`, is kept commented out in the code). See `.env.local.example`.
 
 `OUTPUT_FORMAT` (`mp3_44100_128`) is set at the top of `generate_audio.py`.
 
@@ -93,7 +95,8 @@ python3 web_app.py             # then open http://127.0.0.1:8000
 python3 web_app.py --port 9000
 ```
 
-- Lists every entry from `AUDIO_FILES.txt` with its status (missing / exists / failed); filter by language, status or text.
+- Lists every entry with its status (missing / exists / failed), **missing files first**; filter by language, status or text.
+- **Source text file** and **Output folder** can be chosen from a folder browser ("Choose…"). Entry paths are resolved relative to the output folder, and existing/missing status and playback follow it. A folder that doesn't exist yet is created when generating. Both settings live in memory only; restarting the server returns to `AUDIO_FILES.txt` and this project folder.
 - Play existing audio in the browser.
 - Generate all missing files (in the current filter), only the selected rows, or regenerate with "Regenerate existing files". Live progress, and a Stop button.
 - Pick any voice on your account from a dropdown, and set the delay between generations.

@@ -15,6 +15,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,23 +29,54 @@ INPUT_FILE = ga.BASE_DIR / "AUDIO_FILES.txt"
 # --------------------------------------------------------------------------
 # Data helpers
 # --------------------------------------------------------------------------
-# Optional pasted input; when set it is used instead of AUDIO_FILES.txt.
-# Held in memory only, so restarting the server goes back to the file.
+# Optional pasted input; when set it is used instead of the source file.
+# All of this is held in memory only: restarting the server goes back to
+# AUDIO_FILES.txt and the project folder.
 INPUT = {"pasted": None}
+CONFIG = {"source_file": INPUT_FILE, "output_root": ga.BASE_DIR}
 MAX_PASTE_BYTES = 1_000_000
 
 
 def source_entries():
+    root = CONFIG["output_root"]
     if INPUT["pasted"] is not None:
-        return ga.parse_text(INPUT["pasted"])[0]
-    return ga.parse_entries(INPUT_FILE)
+        return ga.parse_text(INPUT["pasted"], root)[0]
+    return ga.parse_entries(CONFIG["source_file"], root)
+
+
+def resolve_user_path(raw):
+    """Turn user-typed text into an absolute Path (~ and relative paths allowed)."""
+    p = Path(str(raw).strip()).expanduser()
+    if not p.is_absolute():
+        p = ga.BASE_DIR / p
+    return p.resolve()
+
+
+def browse(raw, show_files):
+    d = resolve_user_path(raw) if raw else ga.BASE_DIR
+    if not d.is_dir():
+        raise ValueError("not a folder: " + str(d))
+    dirs, files = [], []
+    try:
+        for child in sorted(d.iterdir(), key=lambda c: c.name.lower()):
+            if child.name.startswith("."):
+                continue
+            if child.is_dir():
+                dirs.append(child.name)
+            elif show_files and child.suffix.lower() == ".txt":
+                files.append(child.name)
+    except PermissionError:
+        raise ValueError("permission denied: " + str(d)) from None
+    parent = str(d.parent) if d.parent != d else None
+    return {"path": str(d), "parent": parent, "dirs": dirs, "files": files}
 
 
 def load_entries():
     """Current entries (file re-read on every call so edits show up)."""
     out = []
+    root = CONFIG["output_root"]
     for lineno, path, lang, text in source_entries():
-        full = (ga.BASE_DIR / path).resolve()
+        full = (root / path).resolve()
         exists = full.is_file() and full.stat().st_size > 0
         out.append(
             {
@@ -108,7 +140,7 @@ class Job:
 JOB = Job()
 
 
-def run_job(api_key, entries, force, delay, voice_id):
+def run_job(api_key, entries, force, delay, voice_id, root):
     try:
         for e in entries:
             with JOB.lock:
@@ -122,6 +154,7 @@ def run_job(api_key, entries, force, delay, voice_id):
                     force,
                     delay,
                     voice_id,
+                    root,
                 )
                 result = {
                     "status": "skipped" if status.startswith("skipped") else "ok",
@@ -155,7 +188,7 @@ def start_job(paths, force, delay, voice_id):
         JOB.total = len(entries)
         JOB.started = time.time()
     threading.Thread(
-        target=run_job, args=(api_key, entries, force, delay, voice_id), daemon=True
+        target=run_job, args=(api_key, entries, force, delay, voice_id, CONFIG["output_root"]), daemon=True
     ).start()
     return len(entries), None
 
@@ -222,9 +255,12 @@ class Handler(BaseHTTPRequestHandler):
                         "entries": load_entries(),
                         "source": "pasted" if INPUT["pasted"] is not None else "file",
                         "pasted": INPUT["pasted"],
+                        "source_file": str(CONFIG["source_file"]),
+                        "output_root": str(CONFIG["output_root"]),
+                        "output_exists": CONFIG["output_root"].is_dir(),
                     }
                 )
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 return self._json({"error": str(exc)}, 500)
 
         if route == "/api/voices":
@@ -236,15 +272,24 @@ class Handler(BaseHTTPRequestHandler):
             except (urllib.error.URLError, TimeoutError, ValueError) as exc:
                 return self._json({"voices": [], "error": str(exc)})
 
+        if route == "/api/browse":
+            q = urllib.parse.parse_qs(query)
+            try:
+                return self._json(
+                    browse((q.get("path") or [""])[0], (q.get("mode") or [""])[0] == "file")
+                )
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+
         if route == "/api/status":
             return self._json(JOB.snapshot())
 
         if route.startswith("/audio/"):
             rel = urllib.request.url2pathname(route[len("/audio/"):])
-            # Only serve files that are listed in AUDIO_FILES.txt.
+            # Only serve files that are listed in the current entries.
             if rel not in {e["path"] for e in load_entries()}:
                 return self._json({"error": "not found"}, 404)
-            full = (ga.BASE_DIR / rel).resolve()
+            full = (CONFIG["output_root"] / rel).resolve()
             if not full.is_file():
                 return self._json({"error": "not found"}, 404)
             return self._file(full, "audio/mpeg")
@@ -292,13 +337,49 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"source": "file", "problems": []})
             if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_PASTE_BYTES:
                 return self._json({"error": "text must be a string under 1 MB"}, 400)
-            entries, problems = ga.parse_text(text)
+            entries, problems = ga.parse_text(text, CONFIG["output_root"])
             if not entries:
                 return self._json({"error": "no valid entries found", "problems": problems[:20]}, 400)
             if JOB.snapshot()["running"]:
                 return self._json({"error": "a job is running"}, 409)
             INPUT["pasted"] = text
             return self._json({"source": "pasted", "count": len(entries), "problems": problems[:20]})
+
+        if self.path == "/api/source":
+            if JOB.snapshot()["running"]:
+                return self._json({"error": "a job is running"}, 409)
+            path = payload.get("path")
+            if not isinstance(path, str) or not path.strip():
+                return self._json({"error": "path is required"}, 400)
+            f = resolve_user_path(path)
+            if f.suffix.lower() != ".txt" or not f.is_file():
+                return self._json({"error": "choose an existing .txt file"}, 400)
+            try:
+                entries, problems = ga.parse_text(f.read_text(encoding="utf-8"), CONFIG["output_root"])
+            except (OSError, ValueError) as exc:
+                return self._json({"error": f"cannot read file: {exc}"}, 400)
+            if not entries:
+                return self._json({"error": "no valid entries found in that file", "problems": problems[:20]}, 400)
+            CONFIG["source_file"] = f
+            INPUT["pasted"] = None
+            return self._json({"count": len(entries), "problems": problems[:20]})
+
+        if self.path == "/api/output":
+            if JOB.snapshot()["running"]:
+                return self._json({"error": "a job is running"}, 409)
+            path = payload.get("path")
+            if not isinstance(path, str) or not path.strip():
+                return self._json({"error": "path is required"}, 400)
+            d = resolve_user_path(path)
+            if d.exists() and not d.is_dir():
+                return self._json({"error": "that path is a file, not a folder"}, 400)
+            anc = d
+            while not anc.exists() and anc.parent != anc:
+                anc = anc.parent
+            if not anc.is_dir():
+                return self._json({"error": "folder cannot be created there"}, 400)
+            CONFIG["output_root"] = d
+            return self._json({"output_root": str(d), "exists": d.is_dir()})
 
         if self.path == "/api/stop":
             with JOB.lock:

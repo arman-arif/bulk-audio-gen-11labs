@@ -9,6 +9,7 @@ Usage:
     python3 generate_audio.py --force         # regenerate even if files exist
     python3 generate_audio.py --limit 3       # only the first 3 entries (testing)
     python3 generate_audio.py --dry-run       # list what would be generated
+    python3 generate_audio.py --input words.txt --output-dir ~/app/assets   # other source / output folder
 
 The API key is read from ELEVENLABS_API_KEY (environment or .env.local).
 Only the Python standard library is required.
@@ -28,7 +29,8 @@ BASE_DIR = Path(__file__).resolve().parent
 # Built-in defaults. Override them without editing code by setting
 # ELEVENLABS_VOICE_ID / ELEVENLABS_MODEL_ID in .env.local or the environment.
 DEFAULT_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"  # Sarah (Arfa: 5WbDBNLwAg4h26Km0GgQ, needs a paid plan)
-DEFAULT_MODEL_ID = "eleven_v4"
+# DEFAULT_MODEL_ID = "eleven_v4"
+DEFAULT_MODEL_ID = "eleven_v4_turbo"
 OUTPUT_FORMAT = "mp3_44100_128"
 API_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 MAX_RETRIES = 5
@@ -52,7 +54,7 @@ VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID") or DEFAULT_VOICE_ID
 MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID") or DEFAULT_MODEL_ID
 
 
-def parse_text(text: str):
+def parse_text(text: str, root: Path = BASE_DIR):
     """Parse "path | lang | text" lines. Returns (entries, problems)."""
     entries, problems = [], []
     for lineno, raw in enumerate(text.splitlines(), 1):
@@ -62,7 +64,7 @@ def parse_text(text: str):
         if len(parts) != 3 or not all(parts):
             problems.append(f"line {lineno}: expected 'path | lang | text'")
             continue
-        err = check_output_path(parts[0])
+        err = check_output_path(parts[0], root)
         if err:
             problems.append(f"line {lineno}: {err}")
             continue
@@ -70,21 +72,22 @@ def parse_text(text: str):
     return entries, problems
 
 
-def parse_entries(path: Path):
-    entries, problems = parse_text(path.read_text(encoding="utf-8"))
+def parse_entries(path: Path, root: Path = BASE_DIR):
+    entries, problems = parse_text(path.read_text(encoding="utf-8"), root)
     for msg in problems:
         print(f"warning: skipping {msg}", file=sys.stderr)
     return entries
 
 
-def check_output_path(rel_path: str):
-    """Return an error string if rel_path is not a safe .mp3 target, else None."""
-    out = (BASE_DIR / rel_path).resolve()
-    if BASE_DIR not in out.parents:
-        return f"output path escapes project directory: {rel_path}"
+def check_output_path(rel_path: str, root: Path = BASE_DIR):
+    """Return an error string if rel_path is not a safe .mp3 target under root, else None."""
+    root = root.resolve()
+    out = (root / rel_path).resolve()
+    if root not in out.parents:
+        return f"output path escapes the output folder: {rel_path}"
     if out.suffix.lower() != ".mp3":
         return f"output file must end in .mp3: {rel_path}"
-    if any(part.startswith(".") for part in out.relative_to(BASE_DIR).parts):
+    if any(part.startswith(".") for part in out.relative_to(root).parts):
         return f"hidden paths are not allowed: {rel_path}"
     return None
 
@@ -119,12 +122,12 @@ def synthesize(api_key: str, text: str, language: str, voice_id: str = VOICE_ID)
     raise RuntimeError("unreachable")
 
 
-def process(api_key, entry, force, delay, voice_id=VOICE_ID):
+def process(api_key, entry, force, delay, voice_id=VOICE_ID, root=BASE_DIR):
     lineno, rel_path, language, text = entry
-    err = check_output_path(rel_path)
+    err = check_output_path(rel_path, root)
     if err:
         raise RuntimeError(err)
-    out = (BASE_DIR / rel_path).resolve()
+    out = (root / rel_path).resolve()
     if out.exists() and out.stat().st_size > 0 and not force:
         return rel_path, "skipped (exists)"
     audio = synthesize(api_key, text, language, voice_id)
@@ -139,6 +142,7 @@ def process(api_key, entry, force, delay, voice_id=VOICE_ID):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", default=str(BASE_DIR / "AUDIO_FILES.txt"))
+    ap.add_argument("--output-dir", default=str(BASE_DIR), help="folder the entry paths are relative to (default: this project folder)")
     ap.add_argument("--force", action="store_true", help="regenerate existing files")
     ap.add_argument("--limit", type=int, help="only process the first N entries")
     ap.add_argument("--workers", type=int, default=1, help="parallel requests (default 1, i.e. sequential)")
@@ -152,10 +156,11 @@ def main() -> int:
         print("error: ELEVENLABS_API_KEY not found in environment or .env.local", file=sys.stderr)
         return 1
 
-    entries = parse_entries(Path(args.input))
+    root = Path(args.output_dir).expanduser().resolve()
+    entries = parse_entries(Path(args.input), root)
     if args.limit:
         entries = entries[: args.limit]
-    print(f"{len(entries)} entries, voice={VOICE_ID}, model={MODEL_ID}")
+    print(f"{len(entries)} entries, voice={VOICE_ID}, model={MODEL_ID}, output={root}")
 
     if args.dry_run:
         for _, path, lang, text in entries:
@@ -164,7 +169,7 @@ def main() -> int:
 
     failures = 0
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
-        futures = {pool.submit(process, api_key, e, args.force, args.delay): e for e in entries}
+        futures = {pool.submit(process, api_key, e, args.force, args.delay, VOICE_ID, root): e for e in entries}
         for done, fut in enumerate(as_completed(futures), 1):
             entry = futures[fut]
             try:
