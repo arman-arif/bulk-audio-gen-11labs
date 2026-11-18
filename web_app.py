@@ -17,13 +17,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import generate_audio as ga
 
 STATIC_DIR = ga.BASE_DIR / "web"
-INPUT_FILE = ga.BASE_DIR / "AUDIO_FILES.txt"
 
 
 # --------------------------------------------------------------------------
@@ -31,10 +31,11 @@ INPUT_FILE = ga.BASE_DIR / "AUDIO_FILES.txt"
 # --------------------------------------------------------------------------
 # Optional pasted input; when set it is used instead of the source file.
 # All of this is held in memory only: restarting the server goes back to
-# AUDIO_FILES.txt and the project folder.
+# the defaults (AUDIO_SOURCE_FILE / AUDIO_OUTPUT_DIR, or AUDIO_FILES.txt and the project folder).
 INPUT = {"pasted": None}
-CONFIG = {"source_file": INPUT_FILE, "output_root": ga.BASE_DIR}
+CONFIG = {"source_file": ga.SOURCE_FILE, "output_root": ga.OUTPUT_DIR}
 MAX_PASTE_BYTES = 1_000_000
+MAX_WORKERS = 10
 
 
 def source_entries():
@@ -105,6 +106,42 @@ def fetch_voices(api_key):
     return voices
 
 
+def eleven_get(path, api_key):
+    req = urllib.request.Request("https://api.elevenlabs.io" + path, headers={"xi-api-key": api_key})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def fetch_models(api_key):
+    out = []
+    for m in eleven_get("/v1/models", api_key):
+        if not m.get("can_do_text_to_speech"):
+            continue
+        rates = m.get("model_rates") or {}
+        out.append(
+            {
+                "id": m["model_id"],
+                "name": m.get("name") or m["model_id"],
+                "multiplier": rates.get("character_cost_multiplier", 1.0)
+                * rates.get("cost_discount_multiplier", 1.0),
+                "languages": [l["language_id"] for l in m.get("languages", [])],
+            }
+        )
+    return out
+
+
+def fetch_credits(api_key):
+    d = eleven_get("/v1/user/subscription", api_key)
+    used, limit = d.get("character_count", 0), d.get("character_limit", 0)
+    return {
+        "tier": d.get("tier"),
+        "used": used,
+        "limit": limit,
+        "remaining": max(0, limit - used),
+        "reset_unix": d.get("next_character_count_reset_unix"),
+    }
+
+
 # --------------------------------------------------------------------------
 # Background job (one at a time)
 # --------------------------------------------------------------------------
@@ -118,7 +155,7 @@ class Job:
         self.stop = False
         self.total = 0
         self.done = 0
-        self.current = None
+        self.active = set()  # files being generated right now
         self.results = {}  # path -> {"status": "ok"|"skipped"|"failed", "message": str}
         self.started = None
         self.finished = None
@@ -130,7 +167,7 @@ class Job:
                 "stopping": self.running and self.stop,
                 "total": self.total,
                 "done": self.done,
-                "current": self.current,
+                "active": sorted(self.active),
                 "results": dict(self.results),
                 "started": self.started,
                 "finished": self.finished,
@@ -140,39 +177,44 @@ class Job:
 JOB = Job()
 
 
-def run_job(api_key, entries, force, delay, voice_id, root):
+def run_job(api_key, entries, force, delay, voice_id, root, model_id, workers):
+    def one(e):
+        with JOB.lock:
+            if JOB.stop:  # Stop pressed: skip files that haven't started yet
+                return
+            JOB.active.add(e["path"])
+        try:
+            _, status = ga.process(
+                api_key,
+                (0, e["path"], e["lang"], e["text"]),
+                force,
+                delay,
+                voice_id,
+                root,
+                model_id,
+            )
+            result = {
+                "status": "skipped" if status.startswith("skipped") else "ok",
+                "message": status,
+            }
+        except Exception as exc:  # noqa: BLE001
+            result = {"status": "failed", "message": str(exc)}
+        with JOB.lock:
+            JOB.active.discard(e["path"])
+            JOB.results[e["path"]] = result
+            JOB.done += 1
+
     try:
-        for e in entries:
-            with JOB.lock:
-                if JOB.stop:
-                    break
-                JOB.current = e["path"]
-            try:
-                _, status = ga.process(
-                    api_key,
-                    (0, e["path"], e["lang"], e["text"]),
-                    force,
-                    delay,
-                    voice_id,
-                    root,
-                )
-                result = {
-                    "status": "skipped" if status.startswith("skipped") else "ok",
-                    "message": status,
-                }
-            except Exception as exc:  # noqa: BLE001
-                result = {"status": "failed", "message": str(exc)}
-            with JOB.lock:
-                JOB.results[e["path"]] = result
-                JOB.done += 1
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(one, entries))
     finally:
         with JOB.lock:
             JOB.running = False
-            JOB.current = None
+            JOB.active.clear()
             JOB.finished = time.time()
 
 
-def start_job(paths, force, delay, voice_id):
+def start_job(paths, force, delay, voice_id, model_id, workers=1):
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
         return None, "ELEVENLABS_API_KEY not found in environment or .env.local"
@@ -188,7 +230,8 @@ def start_job(paths, force, delay, voice_id):
         JOB.total = len(entries)
         JOB.started = time.time()
     threading.Thread(
-        target=run_job, args=(api_key, entries, force, delay, voice_id, CONFIG["output_root"]), daemon=True
+        target=run_job, args=(api_key, entries, force, delay, voice_id, CONFIG["output_root"], model_id, workers),
+        daemon=True,
     ).start()
     return len(entries), None
 
@@ -281,6 +324,17 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
 
+        if route in ("/api/models", "/api/credits"):
+            key = os.environ.get("ELEVENLABS_API_KEY")
+            name = route.rsplit("/", 1)[1]
+            if not key:
+                return self._json({name: [] if name == "models" else None})
+            try:
+                data = fetch_models(key) if name == "models" else fetch_credits(key)
+                return self._json({name: data})
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
+                return self._json({name: [] if name == "models" else None, "error": str(exc)})
+
         if route == "/api/status":
             return self._json(JOB.snapshot())
 
@@ -323,7 +377,14 @@ class Handler(BaseHTTPRequestHandler):
             voice_id = str(payload.get("voice_id") or ga.VOICE_ID)
             if not voice_id.isalnum():
                 return self._json({"error": "invalid voice_id"}, 400)
-            count, err = start_job(paths, bool(payload.get("force")), delay, voice_id)
+            model_id = str(payload.get("model_id") or ga.MODEL_ID)
+            if not model_id.replace("_", "").isalnum():
+                return self._json({"error": "invalid model_id"}, 400)
+            try:
+                workers = min(MAX_WORKERS, max(1, int(payload.get("workers", 1))))
+            except (TypeError, ValueError):
+                return self._json({"error": "invalid workers"}, 400)
+            count, err = start_job(paths, bool(payload.get("force")), delay, voice_id, model_id, workers)
             if err:
                 return self._json({"error": err}, 409 if "running" in err else 400)
             return self._json({"started": count})

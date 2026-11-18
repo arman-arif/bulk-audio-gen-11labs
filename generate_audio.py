@@ -54,6 +54,18 @@ VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID") or DEFAULT_VOICE_ID
 MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID") or DEFAULT_MODEL_ID
 
 
+def resolve_path(raw: str) -> Path:
+    """Expand ~ and resolve relative paths against the project folder."""
+    p = Path(raw).expanduser()
+    return (p if p.is_absolute() else BASE_DIR / p).resolve()
+
+
+# Default source text file and output folder; override in .env.local with
+# AUDIO_SOURCE_FILE / AUDIO_OUTPUT_DIR (absolute, ~ or relative to this folder).
+SOURCE_FILE = resolve_path(os.environ.get("AUDIO_SOURCE_FILE") or "AUDIO_FILES.txt")
+OUTPUT_DIR = resolve_path(os.environ.get("AUDIO_OUTPUT_DIR") or ".")
+
+
 def parse_text(text: str, root: Path = BASE_DIR):
     """Parse "path | lang | text" lines. Returns (entries, problems)."""
     entries, problems = [], []
@@ -92,9 +104,9 @@ def check_output_path(rel_path: str, root: Path = BASE_DIR):
     return None
 
 
-def synthesize(api_key: str, text: str, language: str, voice_id: str = VOICE_ID) -> bytes:
+def synthesize(api_key: str, text: str, language: str, voice_id: str = VOICE_ID, model_id: str = None) -> bytes:
     body = json.dumps(
-        {"text": text, "model_id": MODEL_ID, "language_code": language}
+        {"text": text, "model_id": model_id or MODEL_ID, "language_code": language}
     ).encode("utf-8")
     req = urllib.request.Request(
         f"{API_URL}/{voice_id}?output_format={OUTPUT_FORMAT}",
@@ -122,7 +134,7 @@ def synthesize(api_key: str, text: str, language: str, voice_id: str = VOICE_ID)
     raise RuntimeError("unreachable")
 
 
-def process(api_key, entry, force, delay, voice_id=VOICE_ID, root=BASE_DIR):
+def process(api_key, entry, force, delay, voice_id=VOICE_ID, root=BASE_DIR, model_id=None):
     lineno, rel_path, language, text = entry
     err = check_output_path(rel_path, root)
     if err:
@@ -130,7 +142,7 @@ def process(api_key, entry, force, delay, voice_id=VOICE_ID, root=BASE_DIR):
     out = (root / rel_path).resolve()
     if out.exists() and out.stat().st_size > 0 and not force:
         return rel_path, "skipped (exists)"
-    audio = synthesize(api_key, text, language, voice_id)
+    audio = synthesize(api_key, text, language, voice_id, model_id)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".part")
     tmp.write_bytes(audio)
@@ -141,8 +153,8 @@ def process(api_key, entry, force, delay, voice_id=VOICE_ID, root=BASE_DIR):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--input", default=str(BASE_DIR / "AUDIO_FILES.txt"))
-    ap.add_argument("--output-dir", default=str(BASE_DIR), help="folder the entry paths are relative to (default: this project folder)")
+    ap.add_argument("--input", default=str(SOURCE_FILE), help="source text file (default: AUDIO_SOURCE_FILE or AUDIO_FILES.txt)")
+    ap.add_argument("--output-dir", default=str(OUTPUT_DIR), help="folder the entry paths are relative to (default: AUDIO_OUTPUT_DIR or this project folder)")
     ap.add_argument("--force", action="store_true", help="regenerate existing files")
     ap.add_argument("--limit", type=int, help="only process the first N entries")
     ap.add_argument("--workers", type=int, default=1, help="parallel requests (default 1, i.e. sequential)")

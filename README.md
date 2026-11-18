@@ -76,6 +76,15 @@ ELEVENLABS_MODEL_ID=eleven_v3
 
 Both are optional. If unset, the built-in defaults in `generate_audio.py` are used: voice Sarah (`EXAVITQu4vr4xnSDxMaL`) and model `eleven_v4_turbo` (the previous default, `eleven_v4`, is kept commented out in the code). See `.env.local.example`.
 
+The default source text file and output folder can be set the same way (absolute, `~`, or relative to this folder):
+
+```
+AUDIO_SOURCE_FILE=~/my-app/AUDIO_FILES.txt
+AUDIO_OUTPUT_DIR=~/my-app/assets
+```
+
+If unset, they are `AUDIO_FILES.txt` and this project folder. These are the defaults for both the command line (`--input` / `--output-dir` still override them) and the web interface (where you can also change them with "Choose…").
+
 `OUTPUT_FORMAT` (`mp3_44100_128`) is set at the top of `generate_audio.py`.
 
 ## Free Voices
@@ -99,7 +108,9 @@ python3 web_app.py --port 9000
 - **Source text file** and **Output folder** can be chosen from a folder browser ("Choose…"). Entry paths are resolved relative to the output folder, and existing/missing status and playback follow it. A folder that doesn't exist yet is created when generating. Both settings live in memory only; restarting the server returns to `AUDIO_FILES.txt` and this project folder.
 - Play existing audio in the browser.
 - Generate all missing files (in the current filter), only the selected rows, or regenerate with "Regenerate existing files". Live progress, and a Stop button.
-- Pick any voice on your account from a dropdown, and set the delay between generations.
+- Pick any voice and any text-to-speech model from dropdowns (the model defaults to `ELEVENLABS_MODEL_ID`, i.e. `eleven_v4_turbo` unless you override it). Models show their credit multiplier, and a warning if they don't support a language used in the entries.
+- Shows your remaining ElevenLabs credits, refreshed after each generated file, plus the estimated cost of the missing/selected entries for the chosen model (characters x multiplier), with a warning if you don't have enough.
+- Set the number of **workers** (parallel requests, 1-10; default 1) and the delay after each generation (applied per worker). ElevenLabs limits concurrent requests by plan (free is 2); requests rejected for that are retried automatically, but a value your plan allows is faster. Stop lets in-flight files finish and skips the rest.
 - Optionally paste entries (same `path | language | text` format) into the "Paste entries" box instead of using `AUDIO_FILES.txt`. Pasted entries live in memory only; "Back to AUDIO_FILES.txt" or a server restart returns to the file. Invalid lines are skipped and reported. Output paths must end in `.mp3`, stay inside this folder, and not be hidden paths.
 - Uses the same logic as the command line script, so existing files are skipped the same way.
 

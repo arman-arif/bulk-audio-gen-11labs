@@ -31,6 +31,8 @@
     background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; font: inherit; }
   input[type=number] { width: 90px; }
   select#voice { min-width: 260px; }
+  select#model { min-width: 200px; }
+  .stats.warn { color: var(--warn); } .stats b { color: var(--text); }
   button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text);
            border-radius: 6px; padding: 7px 12px; cursor: pointer; }
   button:hover:not(:disabled) { border-color: var(--accent); }
@@ -96,12 +98,19 @@
       <label>Voice
         <select id="voice"></select>
       </label>
-      <label>Delay between generations (s)
+      <label>Model
+        <select id="model"></select>
+      </label>
+      <label>Workers <span style="font-weight:normal">(parallel)</span>
+        <input type="number" id="workers" min="1" max="10" step="1" value="1" title="Parallel requests. ElevenLabs limits concurrency by plan (free: 2).">
+      </label>
+      <label>Delay after each generation (s)
         <input type="number" id="delay" min="0" step="0.1" value="0.5">
       </label>
       <label class="inline"><input type="checkbox" id="force"> Regenerate existing files</label>
     </div>
-    <div class="row" style="margin-top:12px">
+    <div class="stats" id="credits" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:8px">
       <button class="primary" id="genMissing">Generate all missing</button>
       <button id="genSelected">Generate selected</button>
       <button class="danger" id="stop" disabled>Stop</button>
@@ -176,7 +185,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = { entries: [], selected: new Set(), job: null, results: {}, polling: null };
+const state = { entries: [], selected: new Set(), job: null, results: {}, polling: null, models: [], credits: null };
 
 async function api(path, body) {
   const opt = body === undefined ? {} : {
@@ -218,7 +227,7 @@ function render() {
   for (const e of list) {
     const tr = document.createElement("tr");
     const res = state.results[e.path];
-    const running = state.job?.running && state.job.current === e.path;
+    const running = state.job?.running && state.job.active?.includes(e.path);
 
     const cbTd = document.createElement("td");
     const cb = document.createElement("input");
@@ -255,9 +264,50 @@ function render() {
   updateStats();
 }
 
+const nf = new Intl.NumberFormat();
+const chars = (e) => [...e.text].length;
+function modelInfo() { return state.models.find((m) => m.id === $("model").value); }
+
+// Credits = characters x model multiplier (e.g. v4 turbo costs 0.5 per character).
+function estimate(list) {
+  const mult = modelInfo()?.multiplier ?? 1;
+  return Math.ceil(list.reduce((n, e) => n + chars(e), 0) * mult);
+}
+
+function renderCredits() {
+  const c = state.credits, el = $("credits");
+  el.className = "stats";
+  if (!c) { el.textContent = ""; return; }
+  const missing = estimate(visibleEntries().filter((e) => !e.exists));
+  const sel = estimate(state.entries.filter((e) => state.selected.has(e.path)));
+  let t = `Credits: <b>${nf.format(c.remaining)}</b> left of ${nf.format(c.limit)}` +
+    (c.reset_unix ? ` (resets ${new Date(c.reset_unix * 1000).toLocaleDateString()})` : "") +
+    ` · Estimated cost: missing <b>${nf.format(missing)}</b>` + (state.selected.size ? `, selected <b>${nf.format(sel)}</b>` : "");
+  if (missing > c.remaining) { t += " ⚠ not enough credits for all missing files"; el.classList.add("warn"); }
+  el.innerHTML = t;
+}
+
+async function refreshCredits() {
+  try { state.credits = (await api("/api/credits")).credits; } catch (e) { state.credits = null; }
+  renderCredits();
+}
+
+function modelLabel(m) {
+  const used = new Set(state.entries.map((e) => e.lang));
+  const lacking = [...used].filter((l) => m.languages.length && !m.languages.includes(l));
+  return `${m.name} (${m.multiplier}x)` + (lacking.length ? ` ⚠ no ${lacking.join(", ")}` : "");
+}
+function renderModelOptions() {
+  const sel = $("model"), cur = sel.value;
+  sel.textContent = "";
+  for (const m of state.models) sel.add(new Option(modelLabel(m), m.id));
+  if (cur) sel.value = cur;
+}
+
 function updateStats() {
   const total = state.entries.length;
   const have = state.entries.filter((e) => e.exists).length;
+  renderCredits();
   $("stats").textContent = `${have}/${total} generated · ${state.selected.size} selected`;
   const running = !!state.job?.running;
   $("genMissing").disabled = running;
@@ -271,7 +321,7 @@ function updateStats() {
     const failed = Object.values(j.results).filter((r) => r.status === "failed").length;
     $("progressText").textContent =
       `${j.running ? "Running" : "Finished"}: ${j.done}/${j.total}` +
-      (failed ? ` · ${failed} failed` : "") + (j.current ? ` · ${j.current}` : "");
+      (failed ? ` · ${failed} failed` : "") + (j.active?.length ? ` · generating ${j.active.join(", ")}` : "");
   }
 }
 
@@ -288,6 +338,7 @@ async function loadEntries() {
   $("srcPath").value = data.source === "pasted" ? "(pasted text)" : data.source_file;
   $("outPath").value = data.output_root;
   $("outNote").textContent = data.output_exists ? "" : "Output folder does not exist yet; it will be created when generating.";
+  if (state.models.length) renderModelOptions();
   $("pickSrc").disabled = !!state.job?.running; $("pickOut").disabled = !!state.job?.running;
   const langs = [...new Set(state.entries.map((e) => e.lang))].sort();
   const sel = $("lang"), cur = sel.value;
@@ -319,8 +370,8 @@ async function poll() {
     const prevDone = state.job?.done;
     state.job = s;
     state.results = s.results || {};
-    if (wasRunning && !s.running) await loadEntries();       // job finished: reload and re-sort
-    else if (s.done !== prevDone) { await mergeStatus(); render(); }  // a file finished: update its row
+    if (wasRunning && !s.running) { await loadEntries(); refreshCredits(); }  // job finished: reload and re-sort
+    else if (s.done !== prevDone) { await mergeStatus(); render(); refreshCredits(); }  // a file finished: update its row
     else render();
     if (s.running) schedulePoll(); else state.polling = null;
   } catch (err) { banner(err.message); state.polling = null; }
@@ -335,7 +386,8 @@ async function start(paths) {
   try {
     await api("/api/generate", {
       paths, force: $("force").checked,
-      delay: parseFloat($("delay").value) || 0, voice_id: $("voice").value });
+      delay: parseFloat($("delay").value) || 0, voice_id: $("voice").value, model_id: $("model").value,
+      workers: Math.max(1, Math.min(10, parseInt($("workers").value) || 1)) });
     await poll();
   } catch (err) { banner(err.message); }
 }
@@ -428,7 +480,7 @@ $("all").onchange = (ev) => {
   visibleEntries().forEach((e) => ev.target.checked ? state.selected.add(e.path) : state.selected.delete(e.path));
   render();
 };
-["search", "lang", "status"].forEach((id) => $(id).addEventListener("input", render));
+["search", "lang", "status", "model"].forEach((id) => $(id).addEventListener("input", render));
 
 (async function init() {
   try {
@@ -447,6 +499,16 @@ $("all").onchange = (ev) => {
       if (v.error) banner("Could not load voices: " + v.error);
     }).catch(() => {});
     await loadEntries();
+    api("/api/models").then((r) => {
+      state.models = r.models;
+      if (!state.models.some((m) => m.id === cfg.model_id)) {
+        state.models.unshift({ id: cfg.model_id, name: cfg.model_id, multiplier: 1, languages: [] });
+      }
+      renderModelOptions();
+      $("model").value = cfg.model_id;   // default comes from ELEVENLABS_MODEL_ID / built-in default
+      render();
+    }).catch(() => {});
+    refreshCredits();
     await poll();
   } catch (err) { banner(err.message); }
 })();
