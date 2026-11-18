@@ -1,3 +1,6 @@
+.venv/
+venv/
+__pycache__/
 assets/
 .env
 .env.local

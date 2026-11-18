@@ -28,13 +28,23 @@ INPUT_FILE = ga.BASE_DIR / "AUDIO_FILES.txt"
 # --------------------------------------------------------------------------
 # Data helpers
 # --------------------------------------------------------------------------
+# Optional pasted input; when set it is used instead of AUDIO_FILES.txt.
+# Held in memory only, so restarting the server goes back to the file.
+INPUT = {"pasted": None}
+MAX_PASTE_BYTES = 1_000_000
+
+
+def source_entries():
+    if INPUT["pasted"] is not None:
+        return ga.parse_text(INPUT["pasted"])[0]
+    return ga.parse_entries(INPUT_FILE)
+
+
 def load_entries():
-    """Entries from AUDIO_FILES.txt (re-read on every call so edits show up)."""
+    """Current entries (file re-read on every call so edits show up)."""
     out = []
-    for lineno, path, lang, text in ga.parse_entries(INPUT_FILE):
+    for lineno, path, lang, text in source_entries():
         full = (ga.BASE_DIR / path).resolve()
-        if ga.BASE_DIR not in full.parents:
-            continue
         exists = full.is_file() and full.stat().st_size > 0
         out.append(
             {
@@ -207,7 +217,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/entries":
             try:
-                return self._json({"entries": load_entries()})
+                return self._json(
+                    {
+                        "entries": load_entries(),
+                        "source": "pasted" if INPUT["pasted"] is not None else "file",
+                        "pasted": INPUT["pasted"],
+                    }
+                )
             except OSError as exc:
                 return self._json({"error": str(exc)}, 500)
 
@@ -243,9 +259,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "expected application/json"}, 415)
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_PASTE_BYTES + 10_000:
+                return self._json({"error": "request too large"}, 413)
             payload = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             return self._json({"error": "invalid JSON"}, 400)
+        if not isinstance(payload, dict):
+            return self._json({"error": "expected a JSON object"}, 400)
 
         if self.path == "/api/generate":
             paths = payload.get("paths")
@@ -262,6 +282,23 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._json({"error": err}, 409 if "running" in err else 400)
             return self._json({"started": count})
+
+        if self.path == "/api/input":
+            text = payload.get("text")
+            if text is None or (isinstance(text, str) and not text.strip()):
+                if JOB.snapshot()["running"]:
+                    return self._json({"error": "a job is running"}, 409)
+                INPUT["pasted"] = None  # back to AUDIO_FILES.txt
+                return self._json({"source": "file", "problems": []})
+            if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_PASTE_BYTES:
+                return self._json({"error": "text must be a string under 1 MB"}, 400)
+            entries, problems = ga.parse_text(text)
+            if not entries:
+                return self._json({"error": "no valid entries found", "problems": problems[:20]}, 400)
+            if JOB.snapshot()["running"]:
+                return self._json({"error": "a job is running"}, 409)
+            INPUT["pasted"] = text
+            return self._json({"source": "pasted", "count": len(entries), "problems": problems[:20]})
 
         if self.path == "/api/stop":
             with JOB.lock:

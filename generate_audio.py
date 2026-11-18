@@ -52,17 +52,41 @@ VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID") or DEFAULT_VOICE_ID
 MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID") or DEFAULT_MODEL_ID
 
 
-def parse_entries(path: Path):
-    entries = []
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+def parse_text(text: str):
+    """Parse "path | lang | text" lines. Returns (entries, problems)."""
+    entries, problems = [], []
+    for lineno, raw in enumerate(text.splitlines(), 1):
         if not raw.strip():
             continue
         parts = [p.strip() for p in raw.split("|", 2)]
         if len(parts) != 3 or not all(parts):
-            print(f"warning: skipping malformed line {lineno}: {raw!r}", file=sys.stderr)
+            problems.append(f"line {lineno}: expected 'path | lang | text'")
+            continue
+        err = check_output_path(parts[0])
+        if err:
+            problems.append(f"line {lineno}: {err}")
             continue
         entries.append((lineno, *parts))
+    return entries, problems
+
+
+def parse_entries(path: Path):
+    entries, problems = parse_text(path.read_text(encoding="utf-8"))
+    for msg in problems:
+        print(f"warning: skipping {msg}", file=sys.stderr)
     return entries
+
+
+def check_output_path(rel_path: str):
+    """Return an error string if rel_path is not a safe .mp3 target, else None."""
+    out = (BASE_DIR / rel_path).resolve()
+    if BASE_DIR not in out.parents:
+        return f"output path escapes project directory: {rel_path}"
+    if out.suffix.lower() != ".mp3":
+        return f"output file must end in .mp3: {rel_path}"
+    if any(part.startswith(".") for part in out.relative_to(BASE_DIR).parts):
+        return f"hidden paths are not allowed: {rel_path}"
+    return None
 
 
 def synthesize(api_key: str, text: str, language: str, voice_id: str = VOICE_ID) -> bytes:
@@ -97,9 +121,10 @@ def synthesize(api_key: str, text: str, language: str, voice_id: str = VOICE_ID)
 
 def process(api_key, entry, force, delay, voice_id=VOICE_ID):
     lineno, rel_path, language, text = entry
+    err = check_output_path(rel_path)
+    if err:
+        raise RuntimeError(err)
     out = (BASE_DIR / rel_path).resolve()
-    if BASE_DIR not in out.parents:
-        raise RuntimeError(f"output path escapes project directory: {rel_path}")
     if out.exists() and out.stat().st_size > 0 and not force:
         return rel_path, "skipped (exists)"
     audio = synthesize(api_key, text, language, voice_id)

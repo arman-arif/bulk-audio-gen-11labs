@@ -97,6 +97,7 @@ python3 web_app.py --port 9000
 - Play existing audio in the browser.
 - Generate all missing files (in the current filter), only the selected rows, or regenerate with "Regenerate existing files". Live progress, and a Stop button.
 - Pick any voice on your account from a dropdown, and set the delay between generations.
+- Optionally paste entries (same `path | language | text` format) into the "Paste entries" box instead of using `AUDIO_FILES.txt`. Pasted entries live in memory only; "Back to AUDIO_FILES.txt" or a server restart returns to the file. Invalid lines are skipped and reported. Output paths must end in `.mp3`, stay inside this folder, and not be hidden paths.
 - Uses the same logic as the command line script, so existing files are skipped the same way.
 
 The server only listens on 127.0.0.1 and the API key stays on the server. Only one job runs at a time.

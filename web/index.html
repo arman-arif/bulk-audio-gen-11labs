@@ -55,6 +55,10 @@
   .badge.running { background: var(--accent); color: var(--accent-text); }
   .msg { display: block; font-size: 11px; color: var(--bad); margin-top: 3px; max-width: 280px; word-break: break-word; }
   .tablewrap { overflow-x: auto; }
+  textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+             border-radius: 6px; padding: 8px 10px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, "Noto Sans Bengali", monospace; resize: vertical; }
+  code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+  #pasteMsg.bad { color: var(--bad); }
   .empty { padding: 30px; text-align: center; color: var(--muted); }
   td.play button { padding: 3px 9px; }
 </style>
@@ -86,6 +90,22 @@
     <div class="progress"><div id="bar"></div></div>
     <div class="stats" id="progressText" style="margin-top:6px"></div>
   </div>
+
+  <details class="panel" id="pasteBox">
+    <summary style="cursor:pointer;font-weight:600">Paste entries (optional)</summary>
+    <div class="sub" style="margin:8px 0">
+      Paste text in the same format as AUDIO_FILES.txt, one entry per line:
+      <code>path | language | text</code>. Leave this alone to use AUDIO_FILES.txt.
+      Pasted entries are kept in memory only, and paths must end in .mp3.
+    </div>
+    <textarea id="pasteText" rows="8" spellcheck="false"
+      placeholder="assets/audio/en/apple.mp3 | en | Apple&#10;assets/audio/bn/apple.mp3 | bn | আপেল"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="usePasted">Use pasted entries</button>
+      <button id="useFile">Back to AUDIO_FILES.txt</button>
+      <span class="stats" id="pasteMsg"></span>
+    </div>
+  </details>
 
   <div class="panel">
     <div class="row" style="margin-bottom:10px">
@@ -233,7 +253,11 @@ async function loadEntries() {
   sel.length = 1;
   for (const l of langs) sel.add(new Option(l, l));
   sel.value = langs.includes(cur) ? cur : "";
-  $("sub").textContent = `${state.entries.length} entries from AUDIO_FILES.txt`;
+  state.source = data.source;
+  $("sub").textContent = `${state.entries.length} entries from ` +
+    (data.source === "pasted" ? "pasted text" : "AUDIO_FILES.txt");
+  $("useFile").disabled = data.source !== "pasted";
+  if (data.source === "pasted" && !$("pasteText").value) $("pasteText").value = data.pasted || "";
   render();
 }
 
@@ -268,6 +292,28 @@ $("genMissing").onclick = () => {
   if (!paths.length) return banner("Nothing to generate for the current filter.");
   start(paths);
 };
+async function setInput(text) {
+  const msg = $("pasteMsg");
+  msg.className = "stats"; msg.textContent = "";
+  try {
+    const r = await api("/api/input", { text });
+    state.selected.clear(); state.results = {};
+    await loadEntries();
+    const probs = r.problems || [];
+    msg.textContent = r.source === "pasted"
+      ? `Using ${r.count} pasted entries` + (probs.length ? ` · skipped: ${probs.join("; ")}` : "")
+      : "Using AUDIO_FILES.txt";
+    if (probs.length) msg.className = "stats bad";
+  } catch (err) {
+    msg.className = "stats bad";
+    msg.textContent = err.message;
+  }
+}
+$("usePasted").onclick = () => {
+  if (!$("pasteText").value.trim()) { $("pasteMsg").className = "stats bad"; $("pasteMsg").textContent = "Paste some text first."; return; }
+  setInput($("pasteText").value);
+};
+$("useFile").onclick = () => { $("pasteText").value = ""; setInput(null); };
 $("genSelected").onclick = () => start([...state.selected]);
 $("stop").onclick = async () => { await api("/api/stop", {}); poll(); };
 $("selVisible").onclick = () => { visibleEntries().forEach((e) => state.selected.add(e.path)); render(); };
